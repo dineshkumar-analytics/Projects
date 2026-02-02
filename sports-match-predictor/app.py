@@ -1,56 +1,103 @@
-# app.py
 import streamlit as st
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.svm import SVC
-from sklearn.metrics import accuracy_score
+import pickle
+from sklearn.preprocessing import StandardScaler
 
-# --- Title ---
-st.title("Sports Match Predictor")
+# ---------------------------------
+# Streamlit Page Configuration
+# ---------------------------------
+st.set_page_config(page_title="Rugby Match Predictor", layout="centered")
 
-# --- Upload CSV ---
-st.sidebar.header("Upload Match Data CSV")
-uploaded_file = st.sidebar.file_uploader("Choose a CSV file", type=["csv"])
+st.title("Premiership Rugby 2025 — Match Predictor")
+st.markdown("Predict the winner using **Decision Tree**, **Random Forest**, and **SVC** models.")
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-    st.write("Data Preview:")
+# ---------------------------------
+# Step 1: Load Data & Models
+# ---------------------------------
+@st.cache_resource
+def load_models():
+    try:
+        with open("DecisionTree_model.pkl", "rb") as f:
+            dt_model = pickle.load(f)
+        with open("RandomForest_model.pkl", "rb") as f:
+            rf_model = pickle.load(f)
+        with open("SVC_model.pkl", "rb") as f:
+            svc_model = pickle.load(f)
+        with open("scaler.pkl", "rb") as f:
+            scaler = pickle.load(f)
+        df = pd.read_csv("rugby_data.csv")
+        return df, dt_model, rf_model, svc_model, scaler
+    except FileNotFoundError as e:
+        st.error(f"Required file not found: {e}")
+        st.stop()
+
+df, dt_model, rf_model, svc_model, scaler = load_models()
+st.success("Models and data loaded successfully!")
+
+# ---------------------------------
+# Step 2: Show Dataset
+# ---------------------------------
+with st.expander("View Dataset"):
     st.dataframe(df.head())
 
-    # --- Feature Selection ---
-    st.sidebar.header("Select Features & Target")
-    features = st.sidebar.multiselect("Select feature columns", df.columns.tolist())
-    target = st.sidebar.selectbox("Select target column", df.columns.tolist())
+teams = sorted(set(df["Team_A"]).union(df["Team_B"]))
 
-    if st.sidebar.button("Train Model"):
-        if len(features) == 0:
-            st.error("Please select at least one feature column.")
-        else:
-            # --- Prepare Data ---
-            X = df[features]
-            y = df[target]
+# ---------------------------------
+# Step 3: Match Prediction UI
+# ---------------------------------
+st.header("Predict a Match Result")
 
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+col1, col2 = st.columns(2)
+team_a = col1.selectbox("Home Team", teams)
+team_b = col2.selectbox("Away Team", teams)
 
-            # --- Train Model ---
-            model = SVC()
-            model.fit(X_train, y_train)
+if team_a == team_b:
+    st.warning("Please select two different teams.")
+    st.stop()
 
-            # --- Predict & Evaluate ---
-            y_pred = model.predict(X_test)
-            accuracy = accuracy_score(y_test, y_pred)
-            st.success(f"Model trained! Accuracy: {accuracy:.2f}")
+# ---------------------------------
+# Step 4: Feature Engineering
+# ---------------------------------
+team_matches = df[((df["Team_A"] == team_a) & (df["Team_B"] == team_b)) |
+                  ((df["Team_A"] == team_b) & (df["Team_B"] == team_a))]
 
-            # --- Prediction Section ---
-            st.subheader("Make a Prediction")
-            input_data = {}
-            for feature in features:
-                input_data[feature] = st.number_input(f"Input value for {feature}", value=0)
-            
-            if st.button("Predict Match Outcome"):
-                input_df = pd.DataFrame([input_data])
-                prediction = model.predict(input_df)[0]
-                st.write(f"Predicted Outcome: {prediction}")
-
+if team_matches.empty:
+    team_a_avg = df[df["Team_A"] == team_a]["Score_diff"].mean()
+    team_b_avg = df[df["Team_A"] == team_b]["Score_diff"].mean()
+    avg_diff = 0 if pd.isna(team_a_avg) or pd.isna(team_b_avg) else (team_a_avg - team_b_avg) / 2
+    note = "No direct match data — using average team performance."
 else:
-    st.info("Please upload a CSV file to get started.")
+    team_a_diff = team_matches.loc[team_matches["Team_A"] == team_a, "Score_diff"].mean()
+    team_b_diff = -(team_matches.loc[team_matches["Team_A"] == team_b, "Score_diff"]).mean()
+    avg_diff = (team_a_diff if pd.notna(team_a_diff) else 0) + (team_b_diff if pd.notna(team_b_diff) else 0)
+    note = "Prediction based on past head-to-head data."
+
+X_sample = pd.DataFrame({"Score_diff": [avg_diff]})
+X_scaled = scaler.transform(X_sample)
+
+# ---------------------------------
+# Step 5: Predictions
+# ---------------------------------
+models = {
+    "Decision Tree": dt_model,
+    "Random Forest": rf_model,
+    "SVC": svc_model
+}
+
+predictions = {}
+for name, model in models.items():
+    pred = model.predict(X_scaled)[0]
+    winner = team_a if pred == 1 else team_b
+    predictions[name] = winner
+
+# ---------------------------------
+# Step 6: Display Results
+# ---------------------------------
+st.subheader("Predicted Winners:")
+for name, winner in predictions.items():
+    st.write(f"**{name}** → {winner}")
+
+st.info(f"Note: {note}")
+
+st.markdown("---")
+st.caption("Developed by Dinesh | Rugby Match Winner Predictor")
