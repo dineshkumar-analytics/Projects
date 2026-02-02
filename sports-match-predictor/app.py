@@ -12,14 +12,30 @@ from sklearn.model_selection import train_test_split
 # Streamlit Page Config
 # ---------------------------------
 st.set_page_config(page_title="Rugby Match Predictor", layout="centered")
-
 st.title("Premiership Rugby 2025 — Match Predictor")
 st.markdown("Predict the winner using **Decision Tree**, **Random Forest**, and **SVC** models.")
 
 # ---------------------------------
-# Function: Train models if missing
+# Step 0: Ensure CSV exists
 # ---------------------------------
-def train_and_save_models(csv_file="rugby_data.csv"):
+CSV_FILE = "rugby_data.csv"
+
+if not os.path.exists(CSV_FILE):
+    st.warning("rugby_data.csv not found. Creating a sample dataset...")
+    sample_data = {
+        "Team_A": ["Waratahs", "Reds", "Rebels", "Brumbies", "Force", "Waratahs", "Brumbies", "Rebels"],
+        "Team_B": ["Brumbies", "Force", "Waratahs", "Reds", "Rebels", "Reds", "Force", "Reds"],
+        "Score_diff": [5, -3, 2, -1, 4, 6, -2, 3],
+        "Winner": [1, 0, 1, 0, 1, 1, 0, 1]
+    }
+    df_sample = pd.DataFrame(sample_data)
+    df_sample.to_csv(CSV_FILE, index=False)
+    st.info("Sample rugby_data.csv created!")
+
+# ---------------------------------
+# Step 1: Train models if missing
+# ---------------------------------
+def train_and_save_models(csv_file):
     df = pd.read_csv(csv_file)
     X = df[["Score_diff"]]
     y = df["Winner"]
@@ -28,9 +44,7 @@ def train_and_save_models(csv_file="rugby_data.csv"):
 
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
 
-    # Train models
     dt_model = DecisionTreeClassifier(random_state=42)
     dt_model.fit(X_train_scaled, y_train)
 
@@ -54,12 +68,12 @@ def train_and_save_models(csv_file="rugby_data.csv"):
     return df, dt_model, rf_model, svc_model, scaler
 
 # ---------------------------------
-# Function: Load models & data
+# Step 2: Load models
 # ---------------------------------
 @st.cache_resource
-def load_models(csv_file="rugby_data.csv"):
-    required_files = ["DecisionTree_model.pkl", "RandomForest_model.pkl", "SVC_model.pkl", "scaler.pkl"]
-    if all(os.path.exists(f) for f in required_files):
+def load_models(csv_file):
+    model_files = ["DecisionTree_model.pkl", "RandomForest_model.pkl", "SVC_model.pkl", "scaler.pkl"]
+    if all(os.path.exists(f) for f in model_files):
         with open("DecisionTree_model.pkl", "rb") as f:
             dt_model = pickle.load(f)
         with open("RandomForest_model.pkl", "rb") as f:
@@ -75,13 +89,11 @@ def load_models(csv_file="rugby_data.csv"):
         st.warning("Model files not found. Training models now...")
         return train_and_save_models(csv_file)
 
-# ---------------------------------
-# Load models & data
-# ---------------------------------
-df, dt_model, rf_model, svc_model, scaler = load_models()
+# Load everything
+df, dt_model, rf_model, svc_model, scaler = load_models(CSV_FILE)
 
 # ---------------------------------
-# Show dataset
+# Step 3: Show Dataset
 # ---------------------------------
 with st.expander("View Dataset"):
     st.dataframe(df)
@@ -89,7 +101,7 @@ with st.expander("View Dataset"):
 teams = sorted(set(df["Team_A"]).union(df["Team_B"]))
 
 # ---------------------------------
-# Match Prediction UI
+# Step 4: Match Prediction UI
 # ---------------------------------
 st.header("Predict a Match Result")
 col1, col2 = st.columns(2)
@@ -101,7 +113,7 @@ if team_a == team_b:
     st.stop()
 
 # ---------------------------------
-# Feature Engineering
+# Step 5: Feature Engineering
 # ---------------------------------
 team_matches = df[((df["Team_A"] == team_a) & (df["Team_B"] == team_b)) |
                   ((df["Team_A"] == team_b) & (df["Team_B"] == team_a))]
@@ -121,7 +133,7 @@ X_sample = pd.DataFrame({"Score_diff": [avg_diff]})
 X_scaled = scaler.transform(X_sample)
 
 # ---------------------------------
-# Predictions
+# Step 6: Predictions
 # ---------------------------------
 models = {
     "Decision Tree": dt_model,
@@ -136,7 +148,7 @@ for name, model in models.items():
     predictions[name] = winner
 
 # ---------------------------------
-# Display Results
+# Step 7: Display Results
 # ---------------------------------
 st.subheader("Predicted Winners:")
 for name, winner in predictions.items():
