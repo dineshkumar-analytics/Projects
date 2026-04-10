@@ -13,9 +13,7 @@ BERLIN_TZ = ZoneInfo("Europe/Berlin")
 GMT_TZ = ZoneInfo("UTC")
 
 # ================= HEADERS =================
-HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # ================= SPORT SLUG =================
 SPORT_SLUG = {
@@ -34,7 +32,7 @@ def convert_et_to_timezones(et_date, time_str):
     txt = time_str.lower()
 
     if any(x in txt for x in ["final", "tbd", "post", "ppd", "canceled"]):
-        return pd.NaT, pd.NaT
+        return pd.NaT, pd.NaT   # ✅ FIX
 
     try:
         dt_et = datetime.strptime(
@@ -47,7 +45,7 @@ def convert_et_to_timezones(et_date, time_str):
             dt_et.astimezone(GMT_TZ)
         )
     except:
-        return pd.NaT, pd.NaT
+        return pd.NaT, pd.NaT   # ✅ FIX
 
 # ================= FETCH VENUE =================
 def fetch_venue(game_url, sport_slug):
@@ -63,8 +61,7 @@ def fetch_venue(game_url, sport_slug):
 
         api_url = (
             "https://site.web.api.espn.com/apis/site/v2/sports/"
-            f"basketball/{sport_slug}/summary"
-            f"?event={event_id}"
+            f"basketball/{sport_slug}/summary?event={event_id}"
         )
 
         r = requests.get(api_url, headers=HEADERS, timeout=30)
@@ -77,7 +74,6 @@ def fetch_venue(game_url, sport_slug):
             venue.get("fullName", "").strip(),
             address.get("city", "").strip()
         )
-
     except:
         return "", ""
 
@@ -105,8 +101,7 @@ def fetch_espn_schedule(et_date, sport_slug):
             if "gameId" in a["href"]:
                 game_url = (
                     "https://www.espn.com" + a["href"]
-                    if a["href"].startswith("/")
-                    else a["href"]
+                    if a["href"].startswith("/") else a["href"]
                 )
                 break
 
@@ -127,7 +122,7 @@ def fetch_espn_schedule(et_date, sport_slug):
 
     return pd.DataFrame(fixtures)
 
-# ================= MAIN EXTRACTION =================
+# ================= MAIN LOGIC =================
 def extract_data(start_date, end_date, sport):
     sport_slug = SPORT_SLUG[sport]
 
@@ -153,8 +148,10 @@ def extract_data(start_date, end_date, sport):
         if temp:
             df_all = pd.concat(temp, ignore_index=True)
 
-            # FIX datetime
-            df_all["Berlin DateTime"] = pd.to_datetime(df_all["Berlin DateTime"], errors="coerce")
+            # ✅ CRITICAL FIX
+            df_all["Berlin DateTime"] = pd.to_datetime(
+                df_all["Berlin DateTime"], errors="coerce"
+            )
 
             df_filtered = df_all[
                 df_all["Berlin DateTime"].notna() &
@@ -170,7 +167,10 @@ def extract_data(start_date, end_date, sport):
 
     df_final = pd.concat(all_results, ignore_index=True)
 
-    df_final["GMT DateTime"] = pd.to_datetime(df_final["GMT DateTime"], errors="coerce")
+    # ✅ Ensure GMT datetime safe
+    df_final["GMT DateTime"] = pd.to_datetime(
+        df_final["GMT DateTime"], errors="coerce"
+    )
 
     df_final["Start Date"] = df_final["GMT DateTime"].dt.strftime("%m/%d/%Y")
     df_final["Start Time"] = df_final["GMT DateTime"].dt.strftime("%I:%M:%S %p")
