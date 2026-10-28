@@ -1,335 +1,467 @@
 
 import streamlit as st
 import pandas as pd
-from difflib import SequenceMatcher
-from openpyxl import load_workbook
-from openpyxl.styles import PatternFill
 from io import BytesIO
+from datetime import date, datetime, time
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Font, Alignment
 
-# ================= PAGE CONFIG =================
+# ==================================================
+# 1. PAGE CONFIGURATION
+# ==================================================
 st.set_page_config(
-    page_title="Fixture Comparison Tool",
+    page_title="Basketball Fixture Comparison Tool",
+    page_icon="🏀",
     layout="wide"
 )
 
-st.title("Fixture Comparison Tool")
+st.title("🏀 Basketball Fixture Comparison Tool")
 st.caption(
-    "Detect added, removed, and modified fixtures, "
-    "including spelling differences."
+    "Compare OLD and NEW fixture files using Fixture ID. "
+    "Detect added, removed, and modified fixtures."
 )
 
-# ================= CONFIGURATION =================
-MATCH_THRESHOLD = 0.90
+# ==================================================
+# 2. CONFIGURATION
+# ==================================================
+KEY_COLUMN = "Fixture ID"
 
-REQUIRED_COLS = [
+# These columns will be checked first.
+# All other matching columns in both files will also be compared.
+PRIORITY_COLUMNS = [
+    "Date & Time (Berlin)",
     "Start Date",
     "Start Time",
     "Description",
-    "Venue"
+    "Venue",
+    "GSM Basketball",
+    "STATS Basketball",
+    "User Modified Time",
+    "Sport",
+    "Sport Id",
+    "Ruleset",
+    "Ruleset Id",
+    "Country",
+    "Country Id",
+    "Competition",
+    "Competition Id",
+    "Tournament Calendar",
+    "Tournament Calendar Id",
+    "Stage",
+    "Stage Id",
+    "Series",
+    "Series Id",
+    "Venue Id",
+    "Contestant 1",
+    "Contestant 1 Id",
+    "Contestant 2",
+    "Contestant 2 Id"
 ]
 
-# ================= NORMALIZATION =================
-def normalize_desc(text):
-    if pd.isna(text):
-        return ""
-
-    return " ".join(str(text).lower().split())
-
-
-def similarity(a, b):
-    return SequenceMatcher(None, a, b).ratio()
-
-
+# ==================================================
+# 3. NORMALIZE EXCEL COLUMN NAMES
+# ==================================================
 def clean_columns(df):
-    """Standardize headers to avoid KeyError."""
+    """
+    Remove extra spaces and safely handle duplicate headers.
+    Pandas may read duplicate headers as Description.1, Venue.1.
+    """
+
     df = df.copy()
+    cleaned = []
+    seen = {}
 
-    # Remove extra spaces and normalize case
-    df.columns = [
-        " ".join(str(col).strip().split()).lower()
-        for col in df.columns
-    ]
+    for original in df.columns:
+        name = " ".join(str(original).strip().split())
 
-    # Map common header variations to standard names
+        # Handle headers already suffixed by pandas
+        # when the original Excel file has duplicate names.
+        import re
+
+        match = re.match(r"^(.*)\.(\d+)$", name)
+
+        if match and match.group(1).strip().lower() in {
+            "description", "venue"
+        }:
+            base = match.group(1).strip()
+            number = int(match.group(2)) + 1
+            name = f"{base} ({number})"
+
+        count = seen.get(name.lower(), 0) + 1
+        seen[name.lower()] = count
+
+        if count > 1:
+            name = f"{name} ({count})"
+
+        cleaned.append(name)
+
+    df.columns = cleaned
+
+    # Standardize common variations of the fixture ID
     aliases = {
-        "start date": "Start Date",
-        "date": "Start Date",
-        "start time": "Start Time",
-        "time": "Start Time",
-        "description": "Description",
-        "fixture": "Description",
-        "fixture description": "Description",
-        "match": "Description",
-        "venue": "Venue",
-        "stadium": "Venue"
+        "fixture id": "Fixture ID",
+        "fixtureid": "Fixture ID",
+        "fixture_id": "Fixture ID",
+        "match id": "Fixture ID",
+        "matchid": "Fixture ID"
     }
 
-    rename_map = {
-        col: aliases[col]
-        for col in df.columns
-        if col in aliases
-    }
+    rename_map = {}
+
+    for col in df.columns:
+        if col.strip().lower() in aliases:
+            rename_map[col] = aliases[col.strip().lower()]
 
     df = df.rename(columns=rename_map)
 
+    # Remove completely empty Excel columns
+    df = df.loc[
+        :,
+        [
+            col for col in df.columns
+            if not col.lower().startswith("unnamed:")
+        ]
+    ]
+
     return df
 
 
-def load_fixture_file(uploaded_file):
-    """Read and validate an uploaded Excel file."""
-    df = pd.read_excel(uploaded_file)
+# ==================================================
+# 4. READ AND VALIDATE EXCEL FILES
+# ==================================================
+def read_fixture_file(uploaded_file):
+    df = pd.read_excel(uploaded_file, dtype=object)
     df = clean_columns(df)
 
-    missing_cols = [
-        col for col in REQUIRED_COLS
-        if col not in df.columns
-    ]
-
-    if missing_cols:
+    if KEY_COLUMN not in df.columns:
         raise ValueError(
-            f"Missing required columns: {missing_cols}. "
+            f"'{KEY_COLUMN}' column was not found. "
             f"Available columns: {df.columns.tolist()}"
         )
 
-    # Select only the required columns
-    df = df[REQUIRED_COLS].copy()
-
-    # Standardize text values
-    for col in ["Description", "Venue"]:
+    # Clean whitespace in text values
+    for col in df.columns:
         df[col] = df[col].map(
-            lambda x: x.strip() if isinstance(x, str) else x
+            lambda x: x.strip()
+            if isinstance(x, str)
+            else x
         )
 
-    # Reset index for reliable row matching
-    df = df.reset_index(drop=True)
+    # Remove rows without a fixture ID
+    missing_ids = df[KEY_COLUMN].isna() | (
+        df[KEY_COLUMN].astype(str).str.strip() == ""
+    )
 
-    # Normalize descriptions for fuzzy matching
-    df["Desc_norm"] = df["Description"].apply(normalize_desc)
+    if missing_ids.any():
+        raise ValueError(
+            f"{int(missing_ids.sum())} row(s) have no Fixture ID. "
+            "Please correct these rows in Excel."
+        )
+
+    # Use consistent string IDs for matching
+    df[KEY_COLUMN] = df[KEY_COLUMN].astype(str).str.strip()
+
+    # Detect duplicate IDs
+    duplicates = df.loc[
+        df[KEY_COLUMN].duplicated(keep=False),
+        KEY_COLUMN
+    ].unique()
+
+    if len(duplicates) > 0:
+        raise ValueError(
+            "Duplicate Fixture ID values were found: "
+            + ", ".join(map(str, duplicates[:10]))
+            + ". Each fixture must have a unique ID."
+        )
 
     return df
 
 
-# ================= STREAMLIT HIGHLIGHT =================
+# ==================================================
+# 5. VALUE COMPARISON
+# ==================================================
+def canonical_value(value):
+    """
+    Standardize values so Excel dates and equivalent values
+    can be compared reliably.
+    """
+
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return pd.Timestamp(value).isoformat()
+
+    if isinstance(value, date):
+        return value.isoformat()
+
+    if isinstance(value, time):
+        return value.isoformat()
+
+    if isinstance(value, str):
+        return " ".join(value.split())
+
+    # Treat Excel 10 and 10.0 as equal
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if float(value).is_integer():
+            return int(value)
+
+    return value
+
+
+def values_equal(old_value, new_value):
+    old_value = canonical_value(old_value)
+    new_value = canonical_value(new_value)
+
+    if old_value is None and new_value is None:
+        return True
+
+    if old_value is None or new_value is None:
+        return False
+
+    return old_value == new_value
+
+
+# ==================================================
+# 6. FIXTURE COMPARISON
+# ==================================================
+def compare_fixtures(old_df, new_df):
+
+    old_ids = set(old_df[KEY_COLUMN])
+    new_ids = set(new_df[KEY_COLUMN])
+
+    added_ids = new_ids - old_ids
+    removed_ids = old_ids - new_ids
+    common_ids = old_ids & new_ids
+
+    # Compare fields shared by both files
+    shared_columns = [
+        col for col in old_df.columns
+        if col in new_df.columns and col != KEY_COLUMN
+    ]
+
+    # Compare priority fields first, then other shared fields
+    ordered_columns = [
+        col for col in PRIORITY_COLUMNS
+        if col in shared_columns
+    ]
+
+    ordered_columns += [
+        col for col in shared_columns
+        if col not in ordered_columns
+    ]
+
+    results = []
+    details = []
+
+    old_lookup = old_df.set_index(KEY_COLUMN, drop=False)
+    new_lookup = new_df.set_index(KEY_COLUMN, drop=False)
+
+    # ---------------- ADDED FIXTURES ----------------
+    for fixture_id in sorted(added_ids):
+        new_row = new_lookup.loc[fixture_id]
+
+        record = {
+            "Change Type": "ADDED",
+            KEY_COLUMN: fixture_id
+        }
+
+        for col in ordered_columns:
+            record[f"{col} (OLD)"] = None
+            record[f"{col} (NEW)"] = new_row[col]
+
+        results.append(record)
+
+    # ---------------- REMOVED FIXTURES ----------------
+    for fixture_id in sorted(removed_ids):
+        old_row = old_lookup.loc[fixture_id]
+
+        record = {
+            "Change Type": "REMOVED",
+            KEY_COLUMN: fixture_id
+        }
+
+        for col in ordered_columns:
+            record[f"{col} (OLD)"] = old_row[col]
+            record[f"{col} (NEW)"] = None
+
+        results.append(record)
+
+    # ---------------- EXISTING FIXTURES ----------------
+    for fixture_id in sorted(common_ids):
+        old_row = old_lookup.loc[fixture_id]
+        new_row = new_lookup.loc[fixture_id]
+
+        changed_columns = []
+
+        for col in ordered_columns:
+            old_value = old_row[col]
+            new_value = new_row[col]
+
+            if not values_equal(old_value, new_value):
+                changed_columns.append(col)
+
+                details.append({
+                    KEY_COLUMN: fixture_id,
+                    "Changed Column": col,
+                    "Old Value": old_value,
+                    "New Value": new_value
+                })
+
+        change_type = (
+            "MODIFIED (" + ", ".join(changed_columns) + ")"
+            if changed_columns
+            else "NO CHANGE"
+        )
+
+        record = {
+            "Change Type": change_type,
+            KEY_COLUMN: fixture_id
+        }
+
+        for col in ordered_columns:
+            record[f"{col} (OLD)"] = old_row[col]
+            record[f"{col} (NEW)"] = new_row[col]
+
+        results.append(record)
+
+    result_df = pd.DataFrame(results)
+
+    detail_columns = [
+        KEY_COLUMN,
+        "Changed Column",
+        "Old Value",
+        "New Value"
+    ]
+
+    detail_df = pd.DataFrame(
+        details,
+        columns=detail_columns
+    )
+
+    return result_df, detail_df, ordered_columns
+
+
+# ==================================================
+# 7. HIGHLIGHT COMPARISON ROWS
+# ==================================================
 def highlight_row(row):
-    change_type = str(row["Change Type"])
+    change_type = str(row.get("Change Type", ""))
 
     if change_type == "ADDED":
-        color = "background-color: #C6EFCE"
+        color = "#C6EFCE"
     elif change_type == "REMOVED":
-        color = "background-color: #FFC7CE"
+        color = "#FFC7CE"
     elif change_type.startswith("MODIFIED"):
-        color = "background-color: #FFEB9C"
+        color = "#FFEB9C"
     else:
         color = ""
 
-    return [color] * len(row)
+    return [
+        f"background-color: {color}" if color else ""
+        for _ in row
+    ]
 
 
-# ================= COMPARISON LOGIC =================
-def compare_fixtures(old_df, new_df):
-    matched_new = set()
-    pairs = []
-
-    # Match each OLD fixture with the closest NEW description
-    for old_i, old_row in old_df.iterrows():
-        best_match = None
-        best_score = 0
-
-        for new_j, new_row in new_df.iterrows():
-            if new_j in matched_new:
-                continue
-
-            # Empty descriptions should not fuzzy-match
-            if not old_row["Desc_norm"] or not new_row["Desc_norm"]:
-                continue
-
-            score = similarity(
-                old_row["Desc_norm"],
-                new_row["Desc_norm"]
-            )
-
-            if score > best_score:
-                best_score = score
-                best_match = new_j
-
-        if best_match is not None and best_score >= MATCH_THRESHOLD:
-            matched_new.add(best_match)
-            pairs.append((old_i, best_match))
-        else:
-            pairs.append((old_i, None))
-
-    # Add NEW fixtures that did not match an OLD fixture
-    for new_j in new_df.index:
-        if new_j not in matched_new:
-            pairs.append((None, new_j))
-
-    # Build results
-    rows = []
-
-    for old_i, new_i in pairs:
-        old = old_df.loc[old_i] if old_i is not None else None
-        new = new_df.loc[new_i] if new_i is not None else None
-
-        if old is None:
-            change_type = "ADDED"
-
-        elif new is None:
-            change_type = "REMOVED"
-
-        else:
-            changes = []
-
-            # Compare values safely, including blank cells
-            for col in REQUIRED_COLS:
-                old_val = old[col]
-                new_val = new[col]
-
-                if pd.isna(old_val) and pd.isna(new_val):
-                    continue
-
-                if pd.isna(old_val) or pd.isna(new_val):
-                    changes.append(col)
-                    continue
-
-                # Compare dates and times consistently
-                if col == "Start Date":
-                    old_compare = pd.to_datetime(
-                        old_val, errors="coerce"
-                    )
-                    new_compare = pd.to_datetime(
-                        new_val, errors="coerce"
-                    )
-
-                    if pd.isna(old_compare) or pd.isna(new_compare):
-                        changed = str(old_val).strip() != str(new_val).strip()
-                    else:
-                        changed = old_compare.normalize() != new_compare.normalize()
-
-                elif col == "Start Time":
-                    old_compare = str(old_val).strip()
-                    new_compare = str(new_val).strip()
-                    changed = old_compare != new_compare
-
-                else:
-                    old_compare = normalize_desc(old_val)
-                    new_compare = normalize_desc(new_val)
-                    changed = old_compare != new_compare
-
-                if changed:
-                    changes.append(col)
-
-            if changes:
-                change_type = "MODIFIED (" + ", ".join(changes) + ")"
-            else:
-                change_type = "NO CHANGE"
-
-        rows.append({
-            "Change Type": change_type,
-            "Description_OLD": old["Description"] if old is not None else "",
-            "Description_NEW": new["Description"] if new is not None else "",
-            "Start Date_OLD": old["Start Date"] if old is not None else "",
-            "Start Time_OLD": old["Start Time"] if old is not None else "",
-            "Venue_OLD": old["Venue"] if old is not None else "",
-            "Start Date_NEW": new["Start Date"] if new is not None else "",
-            "Start Time_NEW": new["Start Time"] if new is not None else "",
-            "Venue_NEW": new["Venue"] if new is not None else "",
-        })
-
-    return pd.DataFrame(rows)
-
-
-# ================= FILE UPLOAD =================
+# ==================================================
+# 8. FILE UPLOAD
+# ==================================================
 col1, col2 = st.columns(2)
 
 with col1:
     old_file = st.file_uploader(
         "Upload OLD Fixture File",
         type=["xlsx", "xls"],
-        key="old_upload"
+        key="old_file"
     )
 
 with col2:
     new_file = st.file_uploader(
         "Upload NEW Fixture File",
         type=["xlsx", "xls"],
-        key="new_upload"
+        key="new_file"
     )
 
 
-# ================= PROCESS FILES =================
+# ==================================================
+# 9. PROCESS FILES
+# ==================================================
 if old_file is not None and new_file is not None:
 
     try:
-        old_df = load_fixture_file(old_file)
-        new_df = load_fixture_file(new_file)
+        old_df = read_fixture_file(old_file)
+        new_df = read_fixture_file(new_file)
 
-        st.success("Both files uploaded and validated successfully!")
+        st.success("Both fixture files loaded successfully.")
 
-        with st.expander("View input column names"):
-            st.write("Required columns:", REQUIRED_COLS)
-            st.write("Old file:", old_df.columns.tolist())
-            st.write("New file:", new_df.columns.tolist())
+        # Preview
+        with st.expander("View column names and file previews"):
+            preview1, preview2 = st.columns(2)
 
-        preview1, preview2 = st.columns(2)
+            with preview1:
+                st.write("OLD file columns")
+                st.write(old_df.columns.tolist())
+                st.dataframe(old_df.head(5), use_container_width=True)
 
-        with preview1:
-            st.subheader("Old File Preview")
-            st.dataframe(
-                old_df[REQUIRED_COLS].head(10),
-                use_container_width=True
-            )
-
-        with preview2:
-            st.subheader("New File Preview")
-            st.dataframe(
-                new_df[REQUIRED_COLS].head(10),
-                use_container_width=True
-            )
+            with preview2:
+                st.write("NEW file columns")
+                st.write(new_df.columns.tolist())
+                st.dataframe(new_df.head(5), use_container_width=True)
 
         if st.button("Compare Fixtures", type="primary"):
 
-            final_df = compare_fixtures(old_df, new_df)
+            result_df, detail_df, compared_columns = compare_fixtures(
+                old_df,
+                new_df
+            )
 
-            st.session_state["fixture_comparison"] = final_df
+            st.session_state["fixture_result"] = result_df
+            st.session_state["fixture_details"] = detail_df
+            st.session_state["compared_columns"] = compared_columns
 
-        if "fixture_comparison" in st.session_state:
+        if "fixture_result" in st.session_state:
 
-            final_df = st.session_state["fixture_comparison"]
+            result_df = st.session_state["fixture_result"]
+            detail_df = st.session_state["fixture_details"]
+            compared_columns = st.session_state["compared_columns"]
+
+            # ---------------- SUMMARY ----------------
+            added_count = int(
+                (result_df["Change Type"] == "ADDED").sum()
+            )
+            removed_count = int(
+                (result_df["Change Type"] == "REMOVED").sum()
+            )
+            modified_count = int(
+                result_df["Change Type"]
+                .astype(str)
+                .str.startswith("MODIFIED")
+                .sum()
+            )
+            unchanged_count = int(
+                (result_df["Change Type"] == "NO CHANGE").sum()
+            )
 
             st.subheader("Comparison Summary")
 
-            metric1, metric2, metric3, metric4 = st.columns(4)
+            m1, m2, m3, m4 = st.columns(4)
 
-            metric1.metric(
-                "Added",
-                int((final_df["Change Type"] == "ADDED").sum())
-            )
+            m1.metric("Added Fixtures", added_count)
+            m2.metric("Removed Fixtures", removed_count)
+            m3.metric("Modified Fixtures", modified_count)
+            m4.metric("No Change", unchanged_count)
 
-            metric2.metric(
-                "Removed",
-                int((final_df["Change Type"] == "REMOVED").sum())
-            )
-
-            metric3.metric(
-                "Modified",
-                int(
-                    final_df["Change Type"]
-                    .astype(str)
-                    .str.startswith("MODIFIED")
-                    .sum()
-                )
-            )
-
-            metric4.metric(
-                "No Change",
-                int((final_df["Change Type"] == "NO CHANGE").sum())
-            )
-
-            # ================= PREVIEW =================
-            st.subheader("Comparison Preview")
+            # ---------------- FILTER ----------------
+            st.subheader("Comparison Results")
 
             filter_option = st.selectbox(
-                "Filter results",
+                "Filter by change type",
                 [
                     "All",
                     "ADDED",
@@ -340,41 +472,66 @@ if old_file is not None and new_file is not None:
             )
 
             if filter_option == "All":
-                display_df = final_df
+                filtered_df = result_df
             elif filter_option == "MODIFIED":
-                display_df = final_df[
-                    final_df["Change Type"]
+                filtered_df = result_df[
+                    result_df["Change Type"]
                     .astype(str)
                     .str.startswith("MODIFIED")
                 ]
             else:
-                display_df = final_df[
-                    final_df["Change Type"] == filter_option
+                filtered_df = result_df[
+                    result_df["Change Type"] == filter_option
                 ]
 
             st.dataframe(
-                display_df.style.apply(highlight_row, axis=1),
+                filtered_df.style.apply(highlight_row, axis=1),
                 use_container_width=True
             )
 
-            # ================= EXCEL EXPORT =================
+            st.subheader("Individual Field Changes")
+            st.dataframe(detail_df, use_container_width=True)
+
+            st.caption(
+                "Compared columns: "
+                + ", ".join(compared_columns)
+            )
+
+            # ---------------- EXCEL REPORT ----------------
             output = BytesIO()
 
             with pd.ExcelWriter(
                 output,
                 engine="openpyxl"
             ) as writer:
-                final_df.to_excel(
+
+                result_df.to_excel(
                     writer,
                     index=False,
                     sheet_name="Comparison"
                 )
 
+                detail_df.to_excel(
+                    writer,
+                    index=False,
+                    sheet_name="Change Details"
+                )
+
+                old_df.to_excel(
+                    writer,
+                    index=False,
+                    sheet_name="Old File"
+                )
+
+                new_df.to_excel(
+                    writer,
+                    index=False,
+                    sheet_name="New File"
+                )
+
             output.seek(0)
 
-            # Apply row highlights in Excel
-            wb = load_workbook(output)
-            ws = wb["Comparison"]
+            workbook = load_workbook(output)
 
             fill_added = PatternFill(
                 "solid", fgColor="C6EFCE"
@@ -386,14 +543,16 @@ if old_file is not None and new_file is not None:
                 "solid", fgColor="FFEB9C"
             )
 
+            # Highlight comparison rows
+            ws = workbook["Comparison"]
             headers = [
                 cell.value for cell in ws[1]
             ]
-            change_col_idx = headers.index("Change Type") + 1
+            change_col = headers.index("Change Type") + 1
 
             for row_num in range(2, ws.max_row + 1):
                 value = str(
-                    ws.cell(row_num, change_col_idx).value
+                    ws.cell(row_num, change_col).value
                 )
 
                 if value == "ADDED":
@@ -405,32 +564,62 @@ if old_file is not None and new_file is not None:
                 else:
                     continue
 
-                for col_num in range(1, ws.max_column + 1):
-                    ws.cell(row_num, col_num).fill = fill
+                for cell in ws[row_num]:
+                    cell.fill = fill
 
-            # Prepare the final workbook in memory
+            # Highlight field changes
+            ws_details = workbook["Change Details"]
+
+            for row_num in range(2, ws_details.max_row + 1):
+                for cell in ws_details[row_num]:
+                    cell.fill = fill_modified
+
+            # Format report sheets
+            for sheet in workbook.worksheets:
+                sheet.freeze_panes = "A2"
+                sheet.auto_filter.ref = sheet.dimensions
+
+                for cell in sheet[1]:
+                    cell.font = Font(bold=True)
+                    cell.alignment = Alignment(
+                        vertical="top",
+                        wrap_text=True
+                    )
+
+                for column_cells in sheet.columns:
+                    letter = column_cells[0].column_letter
+                    max_length = 0
+
+                    for cell in column_cells[:100]:
+                        value = (
+                            "" if cell.value is None
+                            else str(cell.value)
+                        )
+                        max_length = max(max_length, len(value))
+
+                    sheet.column_dimensions[letter].width = min(
+                        max(max_length + 2, 12),
+                        35
+                    )
+
             final_output = BytesIO()
-            wb.save(final_output)
+            workbook.save(final_output)
             final_output.seek(0)
 
             st.download_button(
                 label="Download Highlighted Comparison Report",
                 data=final_output.getvalue(),
-                file_name="Fixture_Comparison_Report.xlsx",
+                file_name="Basketball_Fixture_Comparison.xlsx",
                 mime=(
                     "application/vnd.openxmlformats-officedocument."
                     "spreadsheetml.sheet"
                 )
             )
 
-    except Exception as e:
-        st.error(f"Unable to process the files: {e}")
-        st.info(
-            "Check the required column names and the Excel file format. "
-            "The error message above identifies the issue."
-        )
+    except Exception as error:
+        st.error(f"Unable to compare files: {error}")
 
 else:
     st.info(
-        "Please upload both OLD and NEW Excel files to start comparison."
+        "Upload both OLD and NEW Excel files to start comparison."
     )
